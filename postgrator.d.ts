@@ -28,6 +28,7 @@ declare namespace Postgrator {
     migrationDirectory?: string
     migrationPattern?: string
     newline?: string
+    useTransactions?: string
   }
 
   /**

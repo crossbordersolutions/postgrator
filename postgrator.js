@@ -14,6 +14,7 @@ const {
 const DEFAULT_CONFIG = {
   schemaTable: 'schemaversion',
   validateChecksums: true,
+  useTransactions: false
 }
 
 class Postgrator extends EventEmitter {
@@ -22,6 +23,7 @@ class Postgrator extends EventEmitter {
     this.config = Object.assign({}, DEFAULT_CONFIG, config)
     this.migrations = []
     this.commonClient = createCommonClient(this.config)
+    this.useTransactions = this.config.useTransactions;
   }
 
   /**
@@ -210,11 +212,24 @@ class Postgrator extends EventEmitter {
     const { commonClient } = this
     let sequence = Promise.resolve()
     const appliedMigrations = []
+    let currentAutocommitValue
+    let currentMigration
+    if (this.useTransactions) {
+      sequence = sequence
+        .then(() => commonClient.runQuery(commonClient.getGetAutocommitValueSql()))
+        .then(result => {
+          currentAutocommitValue = result.rows[0].autocommit;
+        })
+    }
     migrations.forEach((migration) => {
+      currentMigration = migration
       sequence = sequence
         .then(() => this.emit('migration-started', migration))
         .then(() => migration.getSql())
-        .then((sql) => commonClient.runQuery(sql))
+        .then((sql) => {
+          sql = this.useTransactions ? commonClient.wrapWithTransaction(sql) : sql
+          return commonClient.runQuery(sql)
+        })
         .then(() =>
           commonClient.runQuery(commonClient.persistActionSql(migration))
         )
@@ -225,8 +240,15 @@ class Postgrator extends EventEmitter {
       .then(() => appliedMigrations)
       .catch((error) => {
         error.appliedMigrations = appliedMigrations
-        throw error
-      })
+        error.failedMigration = currentMigration
+        if (this.useTransactions) {
+          return commonClient.rollBack()
+            .then(() => commonClient.runQuery(commonClient.getSetAutocommitValueSql(currentAutocommitValue)))
+            .then(() => { throw error })
+        } else {
+          throw error
+        }
+      }).catch(error => { throw error })
   }
 
   /**
